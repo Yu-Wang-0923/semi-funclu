@@ -26,6 +26,11 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Manuscript files (not synced to public repo)
+*.tex
+peer_review.md
+findings.md
+
 # Session notes (not part of the project artifacts)
 progress.md
 task_plan.md
