@@ -17,7 +17,6 @@ FunClu-Semi is a mixture-model-based functional clustering method that classifie
 | File | Description |
 |------|-------------|
 | `funclu.py` | Core FunClu EM algorithm implementation (PyTorch) |
-| `construction.py` | IDOPRegressor with Legendre basis expansion and ASGL |
 | `plot.py` | Visualization utilities |
 | `english_paper.tex` | English LaTeX manuscript |
 | `chinese_paper.tex` | Chinese verification version |
