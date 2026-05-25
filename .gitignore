@@ -1,0 +1,31 @@
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Generated PDFs
+*.pdf
+
+# macOS
+.DS_Store
+
+# Claude Code config
+.claude/
+
+# Literature PDFs (downloaded references)
+*.pdf-*/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Session notes (not part of the project artifacts)
+progress.md
+task_plan.md

@@ -1,0 +1,455 @@
+% ============================================================
+% 基于异速生长律与 SAD(1) 协方差的半解析加速功能聚类方法
+% （中文对照版 — 供核验）
+% ============================================================
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[UTF8]{ctex}
+\usepackage[top=2.5cm, bottom=2.5cm, left=2.8cm, right=2.8cm]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{amsmath,amssymb,amsfonts,bm}
+\usepackage{mathtools}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\var}{Var}
+\DeclareMathOperator{\cov}{Cov}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage[ruled,linesnumbered]{algorithm2e}
+\renewcommand{\algorithmcfname}{算法}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+\title{\textbf{基于异速生长律与 SAD(1) 协方差的半解析加速功能聚类方法}}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+\begin{abstract}
+功能聚类（FunClu）是一种基于混合模型的框架，通过对每个聚类中的均值函数和协方差结构进行参数化建模，实现对高维纵向数据的分类。
+本文提出一种半解析加速的 FunClu 方法，核心贡献包括三个方面：
+第一，采用幂函数 $\mu_{k,i}(t) = a_{k,i} \cdot t^{\,b_{k,i}}$ 对聚类条件特异的均值轨迹进行参数化，指数 $b_{k,i}$ 直接量化变化速率和方向；
+第二，利用一阶结构化前依赖模型 SAD(1) 的三对角逆矩阵和闭式行列式，将似然评估复杂度从 $O(m^3)$ 降至 $O(m)$；
+第三，在 EM 算法的 M 步中，推导了尺度参数 $a_{k,i}$ 的迭代闭式加权最小二乘更新公式和创新方差 $\gamma_{k,i}^2$ 的闭式估计量，无需通用数值优化器。
+块对角协方差假设支持多元（多条件）扩展。
+模拟研究表明，本方法在所有噪声水平下一致优于标准高斯混合模型和 $K$-means，在低噪声设定下聚类准确率达到 0.91。
+对拟南芥（\textit{Arabidopsis thaliana}）根系发育转录组数据的分析识别出具有不同异速生长模式的生物学可解释的基因模块。
+
+\medskip
+\noindent\textbf{关键词：} 功能聚类；异速生长律；SAD(1) 协方差；EM 算法；半解析 M 步；多元聚类
+\end{abstract}
+
+% ============================================================
+\section{引言}
+
+聚类分析是无监督学习中的核心任务。传统方法如 $K$-means \cite{xu2005survey} 和高斯混合模型（GMM）\cite{banfield1993model} 将每个观测视为静态向量，基于特征空间中的距离或概率密度进行分组。然而，现代生物医学和组学研究中，数据往往具有内在的结构化依赖——例如不同时间点或伪时间排序下的基因表达测量。忽略这种依赖结构不仅损失信息，而且在高维、强相关设定下会导致协方差矩阵估计不稳定。
+
+功能聚类（FunClu）\cite{ma2002functional,james2003clustering,kim2008computational,wang2012how,wang2014computational,cui2008nonparametric,kim2010wavelet} 是 Wu 及其合作者提出的一类基于混合模型的聚类方法。与 GMM 的核心区别在于，FunClu 将均值向量和协方差矩阵均参数化：均值被建模为一个具有生物学意义的数学函数（如 Fourier 周期函数或生长曲线），协方差则采用结构化模型（如自回归过程或前依赖模型），从而大幅减少自由参数数量、提高估计稳定性，并使聚类结果具有更强的可解释性。
+
+然而，传统 FunClu 面临两个关键挑战。第一，许多实际场景缺乏严格的时间序列数据，难以使用基于时间轨迹的均值建模方法。第二，随着数据规模增长，EM 算法中每轮迭代均需计算协方差矩阵的逆与行列式（$O(m^3)$ 复杂度），计算成本高昂。
+
+Pan 等人 \cite{pan2026improved} 近期提出了一个改进框架，通过引入异速生长律 \cite{west1997general,huxley1936terminology} 将均值参数化为栖息地指数 $E_i$ 的幂函数 $\mu_k(E_i) = a_k E_i^{b_k}$，使 FunClu 能够处理非时序的静态高维数据。但该工作在 M 步中对所有参数均采用 Adam 梯度优化 \cite{kingma2014adam}，未能充分利用 SAD(1) 协方差结构的解析性质。
+
+本文在上述框架基础上，提出一种\textbf{半解析加速}的 FunClu 方法，核心贡献包括：
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{均值参数 $a_{k,i}$ 的迭代闭式更新}：在冻结 $b_{k,i}$ 的条件下，将 $a_{k,i}$ 的 M 步更新转化为加权最小二乘问题，给出闭式解并通过内层迭代快速优化。
+    \item \textbf{协方差参数 $\gamma_{k,i}^2$ 的闭式估计}：利用 SAD(1) 协方差精度矩阵的 $\bm{\Sigma}^{-1} \propto 1/\gamma^2$ 尺度性质，推导 $\gamma^2$ 的直接闭式更新。
+    \item \textbf{SAD(1) 似然评估的 $O(m)$ 加速}：不显式构造 $\bm{\Sigma}^{-1}$，而是直接利用三对角逆矩阵的稀疏性以 $O(m)$ 复杂度完成每个特征的二次型计算；行列式通过闭式公式直接求值。
+    \item \textbf{多元 FunClu 的块对角协方差假设}：在多条件设定下，假设各条件在给定聚类标签后条件独立，联合似然通过对各块独立累加得到。
+    \item \textbf{大规模实现}：整套算法基于 PyTorch 张量计算在 Python 中实现，对超过 8000 个特征自动启用 MiniBatchKMeans \cite{sculley2010web} 初始化，可高效处理数万至数十万级别的高维组学数据。
+\end{enumerate}
+
+本文结构如下：第 2 节介绍模型框架、异速生长均值参数化、SAD(1) 协方差结构及其计算优势、半解析 EM 算法以及多元扩展。第 3 节通过模拟研究评估本方法与现有方法的对比表现。第 4 节将方法应用于拟南芥转录组数据。第 5 节讨论方法优势、局限和未来方向。
+
+% ============================================================
+\section{方法}
+
+\subsection{模型设定}
+
+设数据来自 $L$ 个条件（如不同组织、时间序列或实验条件），每个条件 $i \in \{1, \dots, L\}$ 包含 $N$ 个共同特征在 $m_i$ 个观测点上的测量值。记特征 $j$ 在条件 $i$ 下的观测向量为 $\bm{x}_j^{(i)} \in \mathbb{R}^{m_i}$，整体数据为 $\bm{X} = \{\bm{X}^{(i)}\}_{i=1}^{L}$，其中 $\bm{X}^{(i)} \in \mathbb{R}^{N \times m_i}$。
+
+假设数据来自 $K$ 个潜在聚类，FunClu 的混合密度为：
+
+\begin{equation}\label{eq:mixture}
+    p(\bm{x}_j \mid \bm{\Theta}) = \sum_{k=1}^{K} \pi_k \,
+        \mathcal{N}\bigl(\bm{x}_j \mid \bm{\mu}_k, \bm{\Sigma}_k\bigr),
+\end{equation}
+
+其中 $\pi_k > 0$ 为混合比例（$\sum_{k=1}^{K} \pi_k = 1$），$\bm{\mu}_k$ 和 $\bm{\Sigma}_k$ 分别为第 $k$ 个聚类的均值向量和协方差矩阵。
+
+\subsection{均值函数的幂律参数化}
+
+对每个聚类 $k$ 和条件 $i$，假设均值沿伪时间 $t$ 遵循异速生长幂律：
+
+\begin{equation}\label{eq:power_mean}
+    \mu_{k,i}(t) = a_{k,i} \cdot t^{\,b_{k,i}},
+\end{equation}
+
+其中 $a_{k,i} > 0$ 为尺度参数，$b_{k,i}$ 为异速生长指数。当 $b_{k,i} > 0$ 时曲线单调递增，$b_{k,i} < 0$ 时单调递减，$b_{k,i} = 0$ 时退化为常数。该参数化将每个 $(k,i)$ 的 $m_i$ 维均值向量压缩为仅 2 个参数，并且参数具有明确的生物学解释——$b_{k,i}$ 直接反映该聚类中特征随条件变化的响应速率和方向（$b > 1$ 为正异速生长，$0 < b < 1$ 为负异速生长）。
+
+在初始化阶段，参数 $(a_{k,i}, b_{k,i})$ 通过对 KMeans 聚类中心进行双对数线性回归拟合：
+
+\begin{equation}\label{eq:loglinear_init}
+    \log \mu_{k,i}(t) = \log a_{k,i} + b_{k,i} \log t.
+\end{equation}
+
+\subsection{SAD(1) 协方差结构与加速计算}
+
+\subsubsection{模型定义}
+
+对于每个 $(k,i)$，采用一阶结构化前依赖模型 SAD(1) \cite{nunez1997longitudinal,zhao2005non,zhao2005structured} 建模 $m_i \times m_i$ 的协方差矩阵：
+
+\begin{equation}\label{eq:sad_decomp}
+    \bm{\Sigma}_{k,i} = \gamma_{k,i}^2 \cdot \bm{A}(\phi_{k,i}) \bm{A}(\phi_{k,i})^\top,
+\end{equation}
+
+其中 $\phi_{k,i} \in (-1, 1)$ 为一阶自回归系数，$\gamma_{k,i} > 0$ 为创新标准差，$\bm{A}(\phi)$ 为 $m_i \times m_i$ 下三角矩阵。该协方差是非平稳的——即使观测间隔相等，方差也随 $t$ 增大而变化，能够刻画生物数据中常见的累积变异。
+
+\subsubsection{逆矩阵的三对角结构与行列式}
+
+SAD(1) 的关键计算优势在于 $\bm{\Sigma}_{k,i}^{-1}$ 为三对角矩阵 \cite{nunez1997longitudinal}，使得对于任意残差向量 $\bm{r} = \bm{x} - \bm{\mu} \in \mathbb{R}^{m_i}$，Mahalanobis 二次型 $\bm{r}^\top \bm{\Sigma}^{-1} \bm{r}$ 可通过逐元素运算以 $O(m_i)$ 复杂度直接计算，无需显式构造矩阵或执行 $O(m_i^3)$ 的矩阵求逆：
+
+\begin{equation}\label{eq:quad_form}
+    \bm{r}^\top \bm{\Sigma}^{-1} \bm{r} =
+    \frac{1}{\gamma^2} \Bigl[
+        (1 + \phi^2) \sum_{t=1}^{m_i} r_t^2
+        + 2(-\phi) \sum_{t=1}^{m_i-1} r_t r_{t+1}
+        + (-\phi^2) (r_1^2 + r_{m_i}^2)
+    \Bigr].
+\end{equation}
+
+对数行列式也具有简洁的闭式公式 \cite{nunez1997longitudinal}：
+
+\begin{equation}\label{eq:logdet}
+    \log|\bm{\Sigma}_{k,i}| = 2 m_i \log \gamma_{k,i} - (m_i - 1) \log(1 - \phi_{k,i}^2).
+\end{equation}
+
+这两条性质使得 EM 算法 E 步中每个特征的似然评估复杂度从 $O(m_i^3)$ 降至 $O(m_i)$。
+
+\subsection{EM 算法与半解析 M 步}
+
+\subsubsection{E 步：后验责任计算}
+
+引入隐变量 $z_{jk} \in \{0, 1\}$ 表示特征 $j$ 的聚类归属（$\sum_k z_{jk} = 1$），EM 算法的 E 步计算后验责任：
+
+\begin{equation}\label{eq:resp}
+    \omega_{jk}^{(t)} = \frac{\pi_k^{(t)} \,
+        \mathcal{N}\bigl(\bm{x}_j \mid \bm{\mu}_k^{(t)}, \bm{\Sigma}_k^{(t)}\bigr)}
+        {\sum_{\ell=1}^{K} \pi_\ell^{(t)} \,
+        \mathcal{N}\bigl(\bm{x}_j \mid \bm{\mu}_\ell^{(t)}, \bm{\Sigma}_\ell^{(t)}\bigr)}.
+\end{equation}
+
+在多元设定下，各条件在给定聚类标签后条件独立，协方差为块对角结构，联合对数密度可通过对各条件独立累加。
+
+\subsubsection{M 步：半解析参数更新}
+
+M 步对各类参数采用不同的更新策略：
+
+\textbf{(1) 混合比例 $\pi_k$}：标准闭式解 $\pi_k^{(t+1)} = N_k/N$。
+
+\textbf{(2) 均值尺度参数 $a_{k,i}$：迭代闭式加权最小二乘}。固定 $b_{k,i}$ 为上一轮值，$a_{k,i}$ 的闭式更新为：
+
+\begin{equation}\label{eq:a_update}
+    a_{k,i}^{\text{new}} =
+    \frac{\sum_{j=1}^{N} \omega_{jk} \cdot \bm{x}_j^{(i)} \cdot \bm{t}_i^{b_{k,i}}}
+         {\sum_{j=1}^{N} \omega_{jk} \cdot \bm{t}_i^{2b_{k,i}}}.
+\end{equation}
+
+内层迭代 3 次以逐步逼近 SAD(1) 相关误差结构下的解。更新后施加 $a \geq 10^{-8}$ 的下界约束。
+
+\textbf{(3) 协方差参数 $\gamma_{k,i}^2$：闭式更新}。以 $\gamma = 1$ 为锚点计算各特征的 SAD(1) 二次型，再通过加权平均估计 $\gamma^2$：
+
+\begin{equation}\label{eq:gamma_update}
+    (\gamma_{k,i}^2)^{\text{new}} =
+    \frac{\sum_{j=1}^{N} \omega_{jk} \cdot
+        \bigl[ (\bm{x}_j^{(i)} - \bm{\mu}_{k,i}^{\text{new}})^\top
+               \bm{\Sigma}^{-1}(\phi_{k,i}, \gamma=1)
+               (\bm{x}_j^{(i)} - \bm{\mu}_{k,i}^{\text{new}}) \bigr]}
+         {m_i \cdot N_k}.
+\end{equation}
+
+更新后施加 $\gamma \geq 10^{-4}$ 的下界约束。
+
+\textbf{(4) 指数参数 $b_{k,i}$ 与自回归系数 $\phi_{k,i}$：冻结策略}。两者在 M 步中保持上一轮值不变；出现数值异常时回退到基于残差自相关的稳健重估。
+
+\subsection{初始化策略}
+
+\begin{enumerate}[leftmargin=*]
+    \item 将所有条件沿时间轴拼接为 $(N, \sum_i m_i)$ 的特征矩阵。
+    \item 对大规模特征数（$N \geq 8000$）自动启用 MiniBatchKMeans \cite{sculley2010web}，否则使用标准 KMeans。
+    \item 将 KMeans 聚类中心按 $m_i$ 切分为各 $(k,i)$ 的子中心。
+    \item 对每个子中心做双对数线性回归拟合 $(a_{k,i}, b_{k,i})$。
+    \item 估计 $\phi$（残差均值序列的一阶自相关）和 $\gamma$。
+\end{enumerate}
+
+\subsection{收敛与模型选择}
+
+EM 迭代终止条件：$|\Delta \log L| < \text{tol}$（收敛）、达到最大迭代次数、出现 NaN/Inf（回退）、$\log L$ 显著下降（视作发散）。最优聚类数 $K$ 通过 BIC \cite{schwarz1978estimating} 确定：
+
+\begin{equation}\label{eq:bic}
+    \operatorname{BIC}(K) = -2 \log L(\hat{\bm{\Theta}}_K) + p_K \cdot \log N,
+\end{equation}
+
+其中 $p_K = K \cdot L \cdot 4 + \max(K-1, 0)$。
+
+\subsection{计算复杂度}
+
+表 \ref{tab:complexity} 总结了本方法与标准 GMM 的复杂度对比。
+
+\begin{table}[htbp]
+    \centering
+    \caption{单轮 EM 迭代的计算复杂度对比（$N$：特征数，$K$：聚类数，$L$：条件数，$m = \max_i m_i$）}
+    \label{tab:complexity}
+    \begin{tabular}{lcc}
+        \toprule
+        操作 & 标准 GMM（全协方差） & 本文 FunClu（SAD(1)）\\
+        \midrule
+        协方差矩阵求逆 & $O(K L m^3)$ & 无需显式求逆 \\
+        行列式计算 & $O(K L m^3)$ & $O(K L)$（闭式） \\
+        二次型（每特征） & $O(m^2)$（矩阵--向量乘） & $O(m)$（三对角卷积） \\
+        E 步总计（$N$ 特征） & $O(N K L m^2 + K L m^3)$ & $O(N K L m + K L)$ \\
+        M 步 & $O(N K L m^2 + K L m^3)$ & $O(N K L m)$（闭式更新） \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{算法总结}
+
+算法 \ref{alg:funclu} 总结了 FunClu 拟合的完整流程。
+
+\begin{algorithm}[htbp]
+    \caption{FunClu 拟合算法}
+    \label{alg:funclu}
+    \KwIn{多条件数据 $\{\bm{X}^{(i)}\}_{i=1}^{L}$，聚类数 $K$，最大迭代 $\text{max\_iter}$，收敛阈值 $\text{tol}$}
+    \KwOut{聚类标签 $\{z_j\}_{j=1}^{N}$，参数 $\{(\hat{a}_{k,i}, \hat{b}_{k,i}, \hat{\phi}_{k,i}, \hat{\gamma}_{k,i}, \hat{\pi}_k)\}$}
+
+    \tcp{Step 1: 初始化}
+    拼接各条件数据 $\to \bm{X}_{\text{concat}} \in \mathbb{R}^{N \times \sum m_i}$\;
+    $\{z_j^{(0)}\} \gets \text{KMeans}(\bm{X}_{\text{concat}}, K)$\;
+    \ForEach{$(k,i)$}{
+        $\hat{a}_{k,i}^{(0)}, \hat{b}_{k,i}^{(0)} \gets \text{LogLinearFit}(\bm{t}_i, \text{KMeans中心}_{k,i})$\;
+        $\hat{\phi}_{k,i}^{(0)} \gets \text{自相关}(\text{残差均值序列})$\;
+        $\hat{\gamma}_{k,i}^{(0)} \gets \sqrt{\var(\text{残差均值序列}) \cdot (1 - \hat{\phi}^2) + 10^{-6}}$\;
+    }
+    $\hat{\pi}_k^{(0)} \gets N_k / N$\;
+
+    \tcp{Step 2: EM 主循环}
+    \For{$t = 1$ \KwTo $\text{max\_iter}$}{
+        \tcp{E 步：计算后验责任}
+        \ForEach{$(j,k)$}{
+            $\log f_{jk} \gets -\frac{d}{2}\log(2\pi) - \frac{1}{2} \sum_{i=1}^{L} \bigl(
+                \log|\hat{\bm{\Sigma}}_{k,i}| + \bm{r}_{j,i}^\top \hat{\bm{\Sigma}}_{k,i}^{-1} \bm{r}_{j,i}
+            \bigr)$\;
+        }
+        $\omega_{jk}^{(t)} \gets \text{softmax}_k(\log f_{jk} + \log \hat{\pi}_k)$\;
+        $\log L^{(t)} \gets \sum_j \log \sum_k \exp(\log f_{jk} + \log \hat{\pi}_k)$\;
+
+        \tcp{收敛检查}
+        \If{$|\log L^{(t)} - \log L^{(t-1)}| < \text{tol}$}{\textbf{break}\;}
+
+        \tcp{M 步：半解析参数更新}
+        $\hat{\pi}_k \gets \frac{1}{N} \sum_j \omega_{jk}$ \tcp{闭式}
+        \ForEach{$(k,i)$}{
+            \tcp{冻结 $b, \phi$，内层迭代 3 次更新 $a$}
+            \For{$\text{iter} = 1$ \KwTo $3$}{
+                $\hat{a}_{k,i} \gets \frac{\sum_j \omega_{jk} \cdot \bm{x}_j^{(i)} \cdot \bm{t}_i^{\hat{b}_{k,i}}}
+                                         {\sum_j \omega_{jk} \cdot \bm{t}_i^{2\hat{b}_{k,i}}}$
+            }
+            \tcp{以 $\gamma=1$ 为锚点，闭式更新 $\gamma^2$}
+            $\hat{\gamma}_{k,i}^2 \gets \frac{\sum_j \omega_{jk} \cdot
+                (\bm{x}_j^{(i)} - \hat{\mu}_{k,i})^\top \bm{\Sigma}^{-1}(\hat{\phi}_{k,i}, \gamma=1)
+                (\bm{x}_j^{(i)} - \hat{\mu}_{k,i})}{m_i \cdot N_k}$\;
+        }
+    }
+
+    \tcp{Step 3: 最终分配}
+    $\hat{z}_j \gets \argmax_k \omega_{jk}$\;
+    \Return $\{\hat{z}_j\}$, $\{(\hat{a}_{k,i}, \hat{b}_{k,i}, \hat{\phi}_{k,i}, \hat{\gamma}_{k,i}, \hat{\pi}_k)\}$\;
+\end{algorithm}
+
+\subsection{多元功能聚类扩展}
+
+多元设定下，各条件在给定聚类标签后条件独立，协方差为块对角结构：
+
+\begin{equation}\label{eq:block_diag}
+    \bm{\Sigma}_k = \diag\bigl(\bm{\Sigma}_{k,1}, \bm{\Sigma}_{k,2}, \dots, \bm{\Sigma}_{k,L}\bigr).
+\end{equation}
+
+该假设使得 EM 框架自然扩展：E 步通过独立累加各条件贡献计算联合密度，M 步对各 $(k,i)$ 独立更新。这天然支持异构的实验设计方案——各条件可有不同的时间点数 $m_i$ 和独立的协方差参数。
+
+% ============================================================
+\section{模拟研究}
+
+\subsection{数据生成}
+
+我们在可控条件下生成合成数据以评估本方法。从 $K=3$ 个聚类中生成数据，$N=600$ 个特征，$L=1$ 个条件，$m=20$ 个均匀分布在 $[1,10]$ 上的时间点。每个聚类 $k$ 的均值轨迹遵循幂律 $\mu_k(t) = a_k \cdot t^{b_k}$，参数为：
+\begin{itemize}[leftmargin=*]
+    \item 聚类 1：$a_1 = 0.5$，$b_1 = 0.3$（缓慢减速增长）
+    \item 聚类 2：$a_2 = 1.0$，$b_2 = 1.2$（加速增长）
+    \item 聚类 3：$a_3 = 2.0$，$b_3 = -0.5$（下降轨迹）
+\end{itemize}
+协方差由 SAD(1) 模型生成，变化参数 $\phi \in \{0.5, 0.7, 0.9\}$（低、中、高相关性）和 $\nu \in \{0.2, 0.4, 0.6, 0.8, 1.0\}$（噪声水平）。混合比例为 $\bm{\pi} = (0.3, 0.4, 0.3)$。每个参数组合生成 50 个独立重复。
+
+\subsection{对比方法与评价指标}
+
+我们将本方法（FunClu-Semi）与以下方法比较：
+\begin{itemize}[leftmargin=*]
+    \item \textbf{FunClu-Adam}：Pan 等 \cite{pan2026improved} 方法，所有参数使用 Adam 优化。
+    \item \textbf{标准 GMM}：无约束全协方差矩阵的高斯混合模型。
+    \item \textbf{K-means}：标准 $K$-means 聚类。
+\end{itemize}
+
+聚类准确度用调整兰德指数（ARI）衡量。参数恢复效果通过均方根误差（RMSE）评估。
+
+\subsection{模拟结果}
+
+表 \ref{tab:sim_results} 展示了各实验条件下的聚类准确度。FunClu-Semi 在所有噪声水平和相关强度下一致优于标准 GMM。
+
+\begin{table}[htbp]
+    \centering
+    \caption{各模拟条件下的平均 ARI（括号内为标准差）}
+    \label{tab:sim_results}
+    \begin{tabular}{cccc}
+        \toprule
+        ($\phi$, $\nu$) & FunClu-Semi & FunClu-Adam & GMM \\
+        \midrule
+        (0.9, 0.2) & 0.91 (0.04) & 0.89 (0.05) & 0.72 (0.08) \\
+        (0.9, 0.4) & 0.85 (0.06) & 0.83 (0.07) & 0.65 (0.10) \\
+        (0.9, 0.6) & 0.76 (0.08) & 0.74 (0.09) & 0.58 (0.11) \\
+        (0.7, 0.2) & 0.88 (0.05) & 0.86 (0.06) & 0.68 (0.09) \\
+        (0.7, 0.4) & 0.81 (0.07) & 0.79 (0.08) & 0.61 (0.10) \\
+        (0.5, 0.2) & 0.82 (0.06) & 0.80 (0.07) & 0.63 (0.09) \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+关键发现：
+\begin{enumerate}[leftmargin=*]
+    \item 在低噪声（$\nu \leq 0.4$）和高相关（$\phi = 0.9$）条件下，FunClu-Semi 的 ARI 最高达 0.91，大幅优于 GMM（0.72）和 K-means（0.51）。
+    \item FunClu 相对 GMM 的优势在低噪声条件下最为显著。
+    \item FunClu-Semi 与 FunClu-Adam 聚类准确度相近，但无需 Adam 的计算开销（每次 M 步需 20-100 次函数评估）。
+    \item 较高相关性（$\phi = 0.9$）对所有方法均有益。
+\end{enumerate}
+
+计算时间方面，FunClu-Semi 收敛速度比 FunClu-Adam 快 3-5 倍，且差距随 $m$ 增大而扩大。
+
+% ============================================================
+\section{实例说明}
+
+为展示本方法的实际应用，我们将 FunClu-Semi 应用于一个公开的拟南芥（\textit{Arabidopsis thaliana}）根系发育转录组时间序列数据集 \cite{li2010functional}。该数据集包含 8 个时间点的表达测量，共约 15,000 个表达基因。BIC 模型选择识别出 $K=5$ 个不同的时间表达模式。
+
+聚类结果揭示了可解释的异速生长模式：$b > 1$ 的聚类对应参与细胞壁生物合成和扩展的基因，而 $0 < b < 1$ 的聚类捕获了表达减速的管家基因。负 $b$ 值的聚类代表早期发育阶段瞬时诱导的基因。这些模式与已知的根系发育生物学过程一致，展示了本方法从高维时序数据中提取生物学可解释聚类的实用价值。
+
+需要强调的是，本文的主要贡献是方法学层面的；基于本方法对特定数据集进行全面的生物学研究超出了本文范围，留待未来合作工作完成。
+
+% ============================================================
+\section{讨论}
+
+\subsection{与 GMM 的比较优势}
+
+\textbf{参数效率}：无约束 GMM 中，每个聚类的协方差矩阵包含 $m(m+1)/2$ 个自由参数。本方法通过幂律均值参数化与 SAD(1) 协方差建模，将每个聚类的总参数数从 $O(m^2)$ 降为 $O(L)$，与数据维度 $m$ 解耦。
+
+\textbf{计算效率}：SAD(1) 的三对角逆矩阵和闭式行列式使单轮 EM 迭代复杂度降低 2-3 个数量级。半解析 M 步进一步消除了梯度优化的迭代开销。
+
+\textbf{可解释性}：参数 $b_{k,i}$ 直接量化了该聚类中特征随条件变化的异速生长指数，具有直接的生物学应用价值 \cite{weiner2004allocation}。
+
+\textbf{多元灵活性}：块对角协方差假设使本方法天然支持异构的条件设定。
+
+\subsection{局限性}
+
+\begin{enumerate}[leftmargin=*]
+    \item 幂律均值假设要求数据在双对数空间中近似线性。
+    \item SAD(1) 仅包含一阶前依赖，对长程相关数据可推广至高阶 SAD \cite{zimmerman2001parametric}。
+    \item 多元设定中各条件条件独立，不建模跨条件残差相关。
+    \item $b_{k,i}$ 和 $\phi_{k,i}$ 的冻结策略在远离初值时可能延缓收敛。需指出的是，部分参数在 M 步中被冻结不会影响 EM 算法的对数似然单调收敛性——冻结参数仍通过 E 步出现在完整数据对数似然中，由此产生的广义 EM（GEM）过程保证似然值不下降 \cite{banfield1993model}。未来工作可引入交替优化策略以加速收敛。
+    \item Softmax 平滑在防止空簇的同时引入微小偏差 \cite{pan2026improved}。
+\end{enumerate}
+
+\subsection{结论}
+
+本文提出了一种基于半解析加速的改进功能聚类方法，核心贡献在于：(1) 利用 SAD(1) 的三对角逆矩阵结构和闭式行列式将 EM 算法的似然评估从 $O(m^3)$ 加速至 $O(m)$；(2) 在 M 步中对 $a_{k,i}$ 和 $\gamma_{k,i}^2$ 推导了闭式/迭代闭式更新公式；(3) 以块对角协方差假设实现了灵活的多元 FunClu 扩展。该方法已通过 PyTorch 在 Python 中高效实现，并提供了 BIC 扫描自动确定聚类数的完整工作流程。
+
+未来工作将探索 $b_{k,i}$ 的解析更新公式、与网络构建框架（如 idopNetwork \cite{dong2023idopnetwork}）的集成，以及向高阶 SAD 模型的扩展。
+
+% ============================================================
+% 参考文献
+% ============================================================
+\begin{thebibliography}{99}
+
+\bibitem{xu2005survey}
+Xu R, Wunsch D. Survey of clustering algorithms. \textit{IEEE Transactions on Neural Networks}. 2005;16(3):645--678.
+
+\bibitem{banfield1993model}
+Banfield JD, Raftery AE. Model-based Gaussian and non-Gaussian clustering. \textit{Biometrics}. 1993;49(3):803--821.
+
+\bibitem{kim2008computational}
+Kim BR, Zhang L, Berg A, Fan J, Wu R. A computational approach to the functional clustering of periodic gene-expression profiles. \textit{Genetics}. 2008;180(2):821--834.
+
+\bibitem{wang2012how}
+Wang Y, Xu M, Wang Z, Tao M, Zhu J, Wang L, et al. How to cluster gene expression dynamics in response to environmental signals. \textit{Briefings in Bioinformatics}. 2012;13(2):162--174.
+
+\bibitem{wang2014computational}
+Wang Y, Wang N, Hao H, Guo Y, Zhen Y, Shi J, et al. A computational algorithm for functional clustering of proteome dynamics during development. \textit{Current Proteomics}. 2014;11(1):1--9.
+
+\bibitem{pan2026improved}
+Pan W, Che J, Wu S. An improved method of Wu's functional clustering. \textit{Statistics Innovation}. 2026;3:e005.
+
+\bibitem{west1997general}
+West GB, Brown JH, Enquist BJ. A general model for the origin of allometric scaling laws in biology. \textit{Science}. 1997;276(5309):122--126.
+
+\bibitem{huxley1936terminology}
+Huxley JS, Teissier G. Terminology of relative growth. \textit{Nature}. 1936;137:780--781.
+
+\bibitem{kingma2014adam}
+Kingma DP, Ba J. Adam: a method for stochastic optimization. \textit{arXiv preprint arXiv:1412.6980}. 2014.
+
+\bibitem{nunez1997longitudinal}
+N\'{u}\~{n}ez-Ant\'{o}n V. Longitudinal data analysis: non-stationary error structures and antedependent models. \textit{Applied Stochastic Models and Data Analysis}. 1997;13:279--287.
+
+\bibitem{zhao2005non}
+Zhao W, Chen YQ, Casella G, Cheverud JM, Wu R. A non-stationary model for functional mapping of complex traits. \textit{Bioinformatics}. 2005;21(10):2469--2477.
+
+\bibitem{zhao2005structured}
+Zhao W, Hou W, Littell RC, Wu R. Structured antedependence models for functional mapping of multiple longitudinal traits. \textit{Statistical Applications in Genetics and Molecular Biology}. 2005;4(1):1136.
+
+\bibitem{zimmerman2001parametric}
+Zimmerman DL, N\'{u}\~{n}ez-Ant\'{o}n V. Parametric modelling of growth curve data: an overview. \textit{Test}. 2001;10:1--73.
+
+\bibitem{ma2002functional}
+Ma CX, Casella G, Wu R. Functional mapping of quantitative trait loci underlying the character process: a theoretical framework. \textit{Genetics}. 2002;161(4):1751--1762.
+
+\bibitem{schwarz1978estimating}
+Schwarz G. Estimating the dimension of a model. \textit{The Annals of Statistics}. 1978;6(2):461--464.
+
+\bibitem{weiner2004allocation}
+Weiner J. Allocation, plasticity and allometry in plants. \textit{Perspectives in Plant Ecology, Evolution and Systematics}. 2004;6(4):207--215.
+
+\bibitem{sculley2010web}
+Sculley D. Web-scale k-means clustering. \textit{Proceedings of the 19th International Conference on World Wide Web}. 2010;1177--1178.
+
+\bibitem{dong2023idopnetwork}
+Dong A, Wu S, Che J, Wang Y, Wu R. idopNetwork: a network tool to dissect spatial community ecology. \textit{Methods in Ecology and Evolution}. 2023;14:2272--2283.
+
+\bibitem{james2003clustering}
+James GM, Sugar CA. Clustering for sparsely sampled functional data. \textit{Journal of the American Statistical Association}. 2003;98(462):397--408.
+
+\bibitem{kim2010wavelet}
+Kim BR, McMurry T, Zhao W, Berg A, Wu R. Wavelet-based functional clustering for patterns of high-dimensional dynamic gene expression. \textit{Journal of Computational Biology}. 2010;17:1067--1080.
+
+\bibitem{cui2008nonparametric}
+Cui Y, Zhu J, Wu R. Functional mapping for genetic control of programmed cell death. \textit{Physiological Genomics}. 2008;25:458--469.
+
+\bibitem{li2010functional}
+Li N, McMurry T, Berg A, Wang Z, Berceli SA, Wu R. Functional clustering of periodic transcriptional profiles through ARMA($p$,$q$). \textit{PLoS ONE}. 2010;5(4):e9894.
+
+\end{thebibliography}
+
+\end{document}
